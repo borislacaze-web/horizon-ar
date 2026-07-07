@@ -260,31 +260,69 @@
   const CARDS=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSO','SO','OSO','O','ONO','NO','NNO'];
   function cardinal(h){ return CARDS[Math.round(h/22.5)%16]; }
 
-  // ---------- Overpass ----------
-  async function fetchPlaces(lat, lon, radiusKm){
-    const radiusM = Math.round(radiusKm*1000);
-    const key = lat.toFixed(2)+','+lon.toFixed(2)+','+radiusM;
-    if (key === state.lastFetchKey) return;
-    setStatus('chargement des données…');
-    const query = `
-      [out:json][timeout:25];
-      (
-        node["place"~"^(village|hamlet|town|city|isolated_dwelling)$"](around:${radiusM},${lat},${lon});
-        node["natural"="peak"](around:${radiusM},${lat},${lon});
-      );
-      out body;
-    `;
+  // ---------- Sources de données ----------
+  // Villages/villes : geo.api.gouv.fr (API officielle, fiable, communes françaises)
+  // Sommets : Overpass OSM (best-effort, échec non bloquant)
+
+  function destPoint(lat, lon, distKm, brgDeg){
+    const R=6371, d=distKm/R, br=toRad(brgDeg);
+    const la1=toRad(lat), lo1=toRad(lon);
+    const la2=Math.asin(Math.sin(la1)*Math.cos(d)+Math.cos(la1)*Math.sin(d)*Math.cos(br));
+    const lo2=lo1+Math.atan2(Math.sin(br)*Math.sin(d)*Math.cos(la1), Math.cos(d)-Math.sin(la1)*Math.sin(la2));
+    return [toDeg(la2), ((toDeg(lo2)+540)%360)-180];
+  }
+
+  async function fetchJson(url, timeoutMs){
+    const controller = new AbortController();
+    const t = setTimeout(()=> controller.abort(), timeoutMs||10000);
+    try{
+      const res = await fetch(url, {signal:controller.signal});
+      clearTimeout(t);
+      if (!res.ok) throw new Error('HTTP '+res.status);
+      return await res.json();
+    }catch(e){ clearTimeout(t); throw e; }
+  }
+
+  async function fetchCommunes(lat, lon, radiusKm){
+    // 1. Identifier les départements couverts par le rayon (échantillonnage de points)
+    const samples = [[lat,lon]];
+    for (let b=0; b<360; b+=45) samples.push(destPoint(lat, lon, radiusKm, b));
+    const deptCodes = new Set();
+    await Promise.all(samples.map(async ([la,lo])=>{
+      try{
+        const arr = await fetchJson(
+          'https://geo.api.gouv.fr/communes?lat='+la.toFixed(5)+'&lon='+lo.toFixed(5)+'&fields=codeDepartement', 8000);
+        if (Array.isArray(arr)) arr.forEach(c=>{ if(c.codeDepartement) deptCodes.add(c.codeDepartement); });
+      }catch(e){ /* point hors de France (ex: Espagne) ou échec ponctuel : ignoré */ }
+    }));
+    if (deptCodes.size === 0) throw new Error('aucun département trouvé (hors France ?)');
+
+    // 2. Charger toutes les communes de ces départements (avec coordonnées + population)
+    const pts = [];
+    await Promise.all([...deptCodes].map(async code=>{
+      const arr = await fetchJson(
+        'https://geo.api.gouv.fr/departements/'+code+'/communes?fields=nom,centre,population', 12000);
+      for (const c of arr){
+        if (!c.centre || !c.centre.coordinates) continue;
+        const [clon, clat] = c.centre.coordinates;
+        pts.push({
+          name: c.nom, lat: clat, lon: clon,
+          type: (c.population||0) >= 5000 ? 'town' : 'village'
+        });
+      }
+    }));
+    return pts;
+  }
+
+  async function fetchPeaks(lat, lon, radiusM){
+    const query = '[out:json][timeout:15];node["natural"="peak"]["name"](around:'+radiusM+','+lat+','+lon+');out body;';
     const endpoints = [
       'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      'https://overpass.openstreetmap.ru/api/interpreter'
+      'https://overpass.kumi.systems/api/interpreter'
     ];
-    let data=null, lastErr=null;
     for (const ep of endpoints){
-      const host = ep.replace('https://','').split('/')[0];
-      setStatus('interrogation de '+host+'…');
       const controller = new AbortController();
-      const timeoutId = setTimeout(()=> controller.abort(), 20000);
+      const t = setTimeout(()=> controller.abort(), 16000);
       try{
         const res = await fetch(ep, {
           method:'POST',
@@ -292,41 +330,44 @@
           body:'data='+encodeURIComponent(query),
           signal: controller.signal
         });
-        clearTimeout(timeoutId);
-        if (!res.ok){
-          const bodyTxt = await res.text().catch(()=> '');
-          throw new Error('HTTP '+res.status+' ('+host+') '+bodyTxt.slice(0,120));
-        }
-        data = await res.json();
-        break;
-      }catch(e){
-        clearTimeout(timeoutId);
-        lastErr = (e.name === 'AbortError')
-          ? new Error('délai dépassé (20s) sur '+host)
-          : new Error((e.message||String(e))+' sur '+host);
-      }
+        clearTimeout(t);
+        if (!res.ok) continue;
+        const data = await res.json();
+        return data.elements
+          .filter(el=> el.tags && el.tags.name)
+          .map(el=> ({name:el.tags.name, lat:el.lat, lon:el.lon, type:'peak', ele:el.tags.ele}));
+      }catch(e){ clearTimeout(t); }
     }
-    if (!data){
-      const msg = lastErr ? (lastErr.message || String(lastErr)) : 'erreur inconnue';
-      setStatus('Erreur OSM: '+msg.slice(0,140), true);
-      console.error('Overpass fetch failed', lastErr);
+    return null; // échec non bloquant
+  }
+
+  async function fetchPlaces(lat, lon, radiusKm){
+    const radiusM = Math.round(radiusKm*1000);
+    const key = lat.toFixed(2)+','+lon.toFixed(2)+','+radiusM;
+    if (key === state.lastFetchKey) return;
+    setStatus('chargement des communes…');
+
+    let communes;
+    try{
+      communes = await fetchCommunes(lat, lon, radiusKm);
+    }catch(e){
+      setStatus('Erreur communes: '+(e.message||e).toString().slice(0,120), true);
       return;
     }
-    const pts = [];
-    for (const el of data.elements){
-      if (!el.tags) continue;
-      let type=null;
-      if (el.tags.natural === 'peak') type='peak';
-      else if (el.tags.place === 'town' || el.tags.place === 'city') type='town';
-      else if (el.tags.place) type='village';
-      if (!type) continue;
-      const name = el.tags.name || el.tags['name:fr'];
-      if (!name) continue;
-      pts.push({name, lat:el.lat, lon:el.lon, type, ele:el.tags.ele});
-    }
-    state.points = pts;
+    state.points = communes;
     state.lastFetchKey = key;
-    setStatus(pts.length+' lieux chargés (rayon '+radiusKm+' km)');
+    setStatus(communes.length+' communes chargées — recherche des sommets…');
+    scheduleRender();
+
+    // Sommets en arrière-plan, non bloquant
+    const peaks = await fetchPeaks(lat, lon, radiusM);
+    if (peaks && peaks.length){
+      state.points = communes.concat(peaks);
+      setStatus(communes.length+' communes + '+peaks.length+' sommets');
+    } else {
+      setStatus(communes.length+' communes (sommets indisponibles)');
+    }
+    scheduleRender();
   }
 
   // ---------- Rendu AR ----------
