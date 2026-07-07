@@ -276,12 +276,15 @@
     `;
     const endpoints = [
       'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter'
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.openstreetmap.ru/api/interpreter'
     ];
     let data=null, lastErr=null;
     for (const ep of endpoints){
+      const host = ep.replace('https://','').split('/')[0];
+      setStatus('interrogation de '+host+'…');
       const controller = new AbortController();
-      const timeoutId = setTimeout(()=> controller.abort(), 9000);
+      const timeoutId = setTimeout(()=> controller.abort(), 20000);
       try{
         const res = await fetch(ep, {
           method:'POST',
@@ -292,15 +295,15 @@
         clearTimeout(timeoutId);
         if (!res.ok){
           const bodyTxt = await res.text().catch(()=> '');
-          throw new Error('HTTP '+res.status+' ('+ep.replace('https://','').split('/')[0]+') '+bodyTxt.slice(0,120));
+          throw new Error('HTTP '+res.status+' ('+host+') '+bodyTxt.slice(0,120));
         }
         data = await res.json();
         break;
       }catch(e){
         clearTimeout(timeoutId);
         lastErr = (e.name === 'AbortError')
-          ? new Error('délai dépassé (9s) sur '+ep.replace('https://','').split('/')[0])
-          : e;
+          ? new Error('délai dépassé (20s) sur '+host)
+          : new Error((e.message||String(e))+' sur '+host);
       }
     }
     if (!data){
