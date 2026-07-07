@@ -319,23 +319,62 @@
     return pts;
   }
 
-  async function fetchPeaks(lat, lon, radiusM){
-    const peakRadius = Math.round(radiusM*1.4); // les sommets se voient de plus loin
-    const query = '[out:json][timeout:15];node["natural"="peak"]["name"](around:'+peakRadius+','+lat+','+lon+');out body;';
+  async function fetchPeaksFromWikidata(lat, lon, radiusKm){
+    const dLat = radiusKm/111;
+    const dLon = radiusKm/(111*Math.max(0.15, Math.cos(toRad(lat))));
+    const west = lon-dLon, east = lon+dLon, south = lat-dLat, north = lat+dLat;
+    const sparql = `
+      SELECT ?peakLabel ?coord ?ele WHERE {
+        SERVICE wikibase:box {
+          ?peak wdt:P625 ?coord .
+          bd:serviceParam wikibase:cornerWest "Point(${west} ${south})"^^geo:wktLiteral .
+          bd:serviceParam wikibase:cornerEast "Point(${east} ${north})"^^geo:wktLiteral .
+        }
+        VALUES ?type { wd:Q8502 wd:Q207326 }
+        ?peak wdt:P31 ?type .
+        OPTIONAL { ?peak wdt:P2044 ?ele }
+        SERVICE wikibase:label { bd:serviceParam wikibase:language "fr,en". }
+      } LIMIT 400`;
+    const url = 'https://query.wikidata.org/sparql?format=json&query='+encodeURIComponent(sparql);
+    const controller = new AbortController();
+    const t = setTimeout(()=> controller.abort(), 15000);
+    try{
+      const res = await fetch(url, {signal:controller.signal, headers:{'Accept':'application/sparql-results+json'}});
+      clearTimeout(t);
+      if (!res.ok) throw new Error('HTTP '+res.status);
+      const data = await res.json();
+      const seen = new Set();
+      const pts = [];
+      for (const b of data.results.bindings){
+        if (!b.peakLabel || !b.coord) continue;
+        const name = b.peakLabel.value;
+        if (/^Q[0-9]+$/.test(name)) continue; // pas de label = code Wikidata brut, on ignore
+        if (seen.has(name)) continue;
+        seen.add(name);
+        const m = /Point\(([-0-9.]+)\s+([-0-9.]+)\)/.exec(b.coord.value);
+        if (!m) continue;
+        pts.push({name, lon:parseFloat(m[1]), lat:parseFloat(m[2]), type:'peak', ele:b.ele?b.ele.value:undefined});
+      }
+      return pts;
+    }catch(e){ clearTimeout(t); throw e; }
+  }
+
+  async function fetchPeaksFromOverpass(lat, lon, radiusM){
+    const query = '[out:json][timeout:15];node["natural"="peak"]["name"](around:'+radiusM+','+lat+','+lon+');out body;';
     const endpoints = [
-      {url:'https://overpass-api.de/api/interpreter', method:'POST'},
-      {url:'https://overpass.kumi.systems/api/interpreter', method:'POST'},
-      {url:'https://overpass-api.de/api/interpreter?data='+encodeURIComponent(query), method:'GET'},
-      {url:'https://lz4.overpass-api.de/api/interpreter', method:'POST'}
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter'
     ];
     for (const ep of endpoints){
       const controller = new AbortController();
-      const t = setTimeout(()=> controller.abort(), 16000);
+      const t = setTimeout(()=> controller.abort(), 14000);
       try{
-        const opts = ep.method==='GET'
-          ? {method:'GET', signal:controller.signal}
-          : {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'data='+encodeURIComponent(query), signal:controller.signal};
-        const res = await fetch(ep.url, opts);
+        const res = await fetch(ep, {
+          method:'POST',
+          headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:'data='+encodeURIComponent(query),
+          signal: controller.signal
+        });
         clearTimeout(t);
         if (!res.ok) continue;
         const data = await res.json();
@@ -344,7 +383,16 @@
           .map(el=> ({name:el.tags.name, lat:el.lat, lon:el.lon, type:'peak', ele:el.tags.ele}));
       }catch(e){ clearTimeout(t); }
     }
-    return null; // échec non bloquant
+    return null;
+  }
+
+  async function fetchPeaks(lat, lon, radiusM){
+    const peakRadiusKm = (radiusM/1000)*1.4; // les sommets se voient de plus loin
+    try{
+      const pts = await fetchPeaksFromWikidata(lat, lon, peakRadiusKm);
+      if (pts && pts.length) return pts;
+    }catch(e){ /* on retente via Overpass */ }
+    return await fetchPeaksFromOverpass(lat, lon, Math.round(peakRadiusKm*1000));
   }
 
   async function fetchPlaces(lat, lon, radiusKm){
@@ -465,9 +513,15 @@
     }
     if (h==null || isNaN(h)) return;
     h = (h+360)%360;
-    state.heading = h;
-    els.headingVal.textContent = Math.round(h)+'°';
-    els.headingCard.textContent = cardinal(h);
+    if (state.heading==null){
+      state.heading = h;
+    } else {
+      // lissage circulaire (EMA) : évite les sauts brusques dus au bruit du capteur
+      let delta = ((h - state.heading + 540) % 360) - 180;
+      state.heading = (state.heading + delta*0.25 + 360) % 360;
+    }
+    els.headingVal.textContent = Math.round(state.heading)+'°';
+    els.headingCard.textContent = cardinal(state.heading);
     scheduleRender();
   }
 
