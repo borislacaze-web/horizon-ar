@@ -497,8 +497,9 @@
 
     // Anti-encombrement : une étiquette max par tranche angulaire, la plus proche gagne.
     // Tranches distinctes pour sommets (au-dessus de l'horizon) et communes (en dessous).
-    const bucketDeg = Math.max(2.2, fov/16);
-    const chosen = [];
+    const bucketDeg = Math.max(4, fov/10);
+    let chosen = [];
+    const MAX_PEAKS = 5, MAX_PLACES = 6;
     for (const group of ['peak','other']){
       const buckets = new Map();
       for (const p of visible){
@@ -508,7 +509,12 @@
         const ex = buckets.get(key);
         if (!ex || p.dist < ex.dist) buckets.set(key, p);
       }
-      chosen.push(...buckets.values());
+      let arr = [...buckets.values()];
+      // priorité : villes avant villages avant hameaux, puis plus proche
+      const rank = q => q.type==='town' ? 0 : q.type==='village' ? 1 : 2;
+      arr.sort((a,b)=> (rank(a)-rank(b)) || (a.dist-b.dist));
+      arr = arr.slice(0, group==='peak' ? MAX_PEAKS : MAX_PLACES);
+      chosen.push(...arr);
     }
 
     // Placement : ancre à x=azimut ; communes ancrées bas (55% hauteur), sommets haut (38%).
@@ -545,7 +551,9 @@
         setTimeout(()=> el.remove(), 320);
       }
     }
-    els.hiddenNote.textContent = '';
+    els.hiddenNote.textContent = (visible.length > chosen.length)
+      ? ('+'+(visible.length-chosen.length)+' à proximité (réduis le rayon pour les voir)')
+      : '';
   }
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
