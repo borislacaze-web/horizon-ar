@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0e14">
+<title>Horizon — Villages & Sommets</title>
+<style>
+  :root{
+    --bg:#0a0e14;
+    --ink:#eef2f6;
+    --dim:#93a1b3;
+    --line:rgba(238,242,246,0.14);
+    --accent-village:#3ddc97;
+    --accent-peak:#f2b84b;
+    --accent-town:#5aa8ff;
+    --glass:rgba(10,14,20,0.55);
+    --danger:#ff5c5c;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:var(--bg); color:var(--ink); overflow:hidden;
+    font-size:15px;
+  }
+  #app{position:fixed; inset:0; overflow:hidden;}
+
+  #camera{
+    position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; background:#000;
+  }
+  #arLayer{
+    position:absolute; inset:0; width:100%; height:100%;
+    pointer-events:none;
+  }
+  #horizonLine{
+    position:absolute; left:0; right:0; top:50%;
+    height:1px; background:rgba(255,255,255,0.18);
+  }
+
+  .tag{
+    position:absolute; top:50%; transform:translate(-50%,-50%);
+    padding:6px 10px 6px 8px; border-radius:10px;
+    background:var(--glass); backdrop-filter:blur(6px);
+    border:1px solid var(--line);
+    white-space:nowrap; display:flex; align-items:baseline; gap:6px;
+    transition:opacity .15s linear;
+  }
+  .tag .dot{width:7px; height:7px; border-radius:50%; flex:0 0 auto;}
+  .tag.village .dot{background:var(--accent-village);}
+  .tag.town .dot{background:var(--accent-town);}
+  .tag.peak .dot{background:var(--accent-peak);}
+  .tag .name{font-weight:600; font-size:14px; letter-spacing:.01em;}
+  .tag .dist{color:var(--dim); font-size:11.5px; font-variant-numeric:tabular-nums;}
+
+  #topBar{
+    position:absolute; top:0; left:0; right:0;
+    padding:calc(env(safe-area-inset-top,0px) + 10px) 12px 10px;
+    display:flex; justify-content:space-between; align-items:flex-start;
+    background:linear-gradient(to bottom, rgba(0,0,0,0.55), transparent);
+    pointer-events:none;
+  }
+  #compassReadout{
+    pointer-events:auto;
+    background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(6px);
+    padding:6px 12px; border-radius:12px; font-variant-numeric:tabular-nums;
+    font-size:13px; display:flex; gap:8px; align-items:center;
+  }
+  #compassReadout b{font-size:15px;}
+  #statusPill{
+    pointer-events:auto;
+    background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(6px);
+    padding:6px 10px; border-radius:12px; font-size:12px; color:var(--dim);
+    max-width:52vw; text-align:right;
+  }
+  #statusPill.warn{color:var(--danger); border-color:rgba(255,92,92,0.4);}
+
+  #bottomBar{
+    position:absolute; left:0; right:0; bottom:0;
+    padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 14px);
+    background:linear-gradient(to top, rgba(0,0,0,0.6), transparent);
+    display:flex; justify-content:center; gap:10px;
+  }
+  .pillBtn{
+    pointer-events:auto;
+    background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(6px);
+    color:var(--ink); padding:11px 16px; border-radius:14px; font-size:13.5px;
+    display:flex; align-items:center; gap:6px; font-weight:600;
+  }
+  .pillBtn:active{background:rgba(255,255,255,0.12);}
+
+  #panel{
+    position:absolute; inset:0; background:rgba(6,9,14,0.94);
+    backdrop-filter:blur(10px);
+    display:none; flex-direction:column;
+    padding:calc(env(safe-area-inset-top,0px) + 18px) 20px 20px;
+    overflow-y:auto;
+  }
+  #panel.open{display:flex;}
+  #panel h1{font-size:20px; margin:0 0 4px;}
+  #panel .sub{color:var(--dim); font-size:13px; margin:0 0 22px;}
+  .field{margin-bottom:22px;}
+  .field label{display:flex; justify-content:space-between; font-size:13.5px; color:var(--dim); margin-bottom:8px;}
+  .field label span.val{color:var(--ink); font-weight:600;}
+  input[type=range]{width:100%; accent-color:var(--accent-town);}
+  .toggleRow{display:flex; gap:10px; flex-wrap:wrap;}
+  .chip{
+    border:1px solid var(--line); border-radius:12px; padding:9px 14px;
+    font-size:13.5px; display:flex; align-items:center; gap:7px; color:var(--dim);
+  }
+  .chip.active{color:var(--ink); border-color:currentColor;}
+  .chip .dot{width:8px;height:8px;border-radius:50%;}
+  .chip.village.active{color:var(--accent-village);}
+  .chip.town.active{color:var(--accent-town);}
+  .chip.peak.active{color:var(--accent-peak);}
+  #closePanel{
+    position:absolute; top:calc(env(safe-area-inset-top,0px) + 14px); right:16px;
+    background:var(--glass); border:1px solid var(--line); border-radius:50%;
+    width:34px; height:34px; display:flex; align-items:center; justify-content:center;
+    font-size:16px; color:var(--ink);
+  }
+  #refreshBtn{margin-top:auto;}
+  #startOverlay{
+    position:absolute; inset:0; background:var(--bg);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:30px; text-align:center; gap:16px; z-index:20;
+  }
+  #startOverlay h1{font-size:22px; margin:0;}
+  #startOverlay p{color:var(--dim); font-size:14px; max-width:340px; line-height:1.5; margin:0;}
+  #startOverlay button{
+    margin-top:10px; background:var(--accent-town); color:#04121f; border:none;
+    padding:14px 28px; border-radius:14px; font-size:15px; font-weight:700;
+  }
+  #startOverlay .err{color:var(--danger); font-size:13px; max-width:340px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <video id="camera" autoplay playsinline muted></video>
+  <div id="arLayer">
+    <div id="horizonLine"></div>
+  </div>
+
+  <div id="topBar">
+    <div id="compassReadout"><b id="headingVal">--°</b><span id="headingCard">-</span></div>
+    <div id="statusPill">initialisation…</div>
+  </div>
+
+  <div id="bottomBar">
+    <div class="pillBtn" id="openPanelBtn">⚙︎ Réglages</div>
+    <div class="pillBtn" id="recenterBtn">◎ Points</div>
+  </div>
+
+  <div id="panel">
+    <div id="closePanel">✕</div>
+    <h1>Réglages</h1>
+    <p class="sub">Ajustez le rayon de recherche et les types de lieux affichés.</p>
+
+    <div class="field">
+      <label>Rayon de recherche <span class="val" id="radiusVal">25 km</span></label>
+      <input type="range" id="radiusSlider" min="2" max="60" step="1" value="25">
+    </div>
+
+    <div class="field">
+      <label>Angle de champ (calibration caméra) <span class="val" id="fovVal">62°</span></label>
+      <input type="range" id="fovSlider" min="40" max="90" step="1" value="62">
+    </div>
+
+    <div class="field">
+      <label>Correction boussole <span class="val" id="offsetVal">0°</span></label>
+      <input type="range" id="offsetSlider" min="-30" max="30" step="1" value="0">
+    </div>
+
+    <div class="field">
+      <label>Types de lieux affichés</label>
+      <div class="toggleRow">
+        <div class="chip village active" data-type="village"><span class="dot" style="background:var(--accent-village)"></span>Villages / hameaux</div>
+        <div class="chip town active" data-type="town"><span class="dot" style="background:var(--accent-town)"></span>Villes</div>
+        <div class="chip peak active" data-type="peak"><span class="dot" style="background:var(--accent-peak)"></span>Sommets</div>
+      </div>
+    </div>
+
+    <div class="pillBtn" id="refreshBtn" style="justify-content:center;">↻ Recharger les données autour de moi</div>
+  </div>
+
+  <div id="startOverlay">
+    <h1>Horizon</h1>
+    <p>Pointez votre téléphone vers le paysage pour voir apparaître le nom des villages, villes et sommets autour de vous. L'accès à la caméra, à la position GPS et à la boussole est nécessaire.</p>
+    <button id="startBtn">Activer la caméra</button>
+    <div class="err" id="startErr"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  const state = {
+    lat:null, lon:null,
+    heading:null,           // 0-360, 0 = nord, sens horaire
+    headingOffset:0,
+    fov:62,
+    radiusKm:25,
+    points:[],              // {name, lat, lon, type, dist, bearing}
+    typesOn:{village:true, town:true, peak:true},
+    lastFetchKey:null
+  };
+
+  const els = {
+    camera: document.getElementById('camera'),
+    arLayer: document.getElementById('arLayer'),
+    headingVal: document.getElementById('headingVal'),
+    headingCard: document.getElementById('headingCard'),
+    statusPill: document.getElementById('statusPill'),
+    startOverlay: document.getElementById('startOverlay'),
+    startBtn: document.getElementById('startBtn'),
+    startErr: document.getElementById('startErr'),
+    panel: document.getElementById('panel'),
+    openPanelBtn: document.getElementById('openPanelBtn'),
+    closePanel: document.getElementById('closePanel'),
+    recenterBtn: document.getElementById('recenterBtn'),
+    radiusSlider: document.getElementById('radiusSlider'),
+    radiusVal: document.getElementById('radiusVal'),
+    fovSlider: document.getElementById('fovSlider'),
+    fovVal: document.getElementById('fovVal'),
+    offsetSlider: document.getElementById('offsetSlider'),
+    offsetVal: document.getElementById('offsetVal'),
+    refreshBtn: document.getElementById('refreshBtn'),
+    chips: document.querySelectorAll('.chip')
+  };
+
+  function setStatus(text, warn){
+    els.statusPill.textContent = text;
+    els.statusPill.classList.toggle('warn', !!warn);
+  }
+
+  // ---------- Géométrie ----------
+  function toRad(d){ return d * Math.PI/180; }
+  function toDeg(r){ return r * 180/Math.PI; }
+
+  function haversineDist(lat1,lon1,lat2,lon2){
+    const R=6371;
+    const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+    const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+    return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+  function bearing(lat1,lon1,lat2,lon2){
+    const y=Math.sin(toRad(lon2-lon1))*Math.cos(toRad(lat2));
+    const x=Math.cos(toRad(lat1))*Math.sin(toRad(lat2)) - Math.sin(toRad(lat1))*Math.cos(toRad(lat2))*Math.cos(toRad(lon2-lon1));
+    return (toDeg(Math.atan2(y,x))+360)%360;
+  }
+  function angDiff(a,b){
+    let d=(a-b+540)%360-180;
+    return d;
+  }
+  const CARDS=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSO','SO','OSO','O','ONO','NO','NNO'];
+  function cardinal(h){ return CARDS[Math.round(h/22.5)%16]; }
+
+  // ---------- Overpass ----------
+  async function fetchPlaces(lat, lon, radiusKm){
+    const radiusM = Math.round(radiusKm*1000);
+    const key = lat.toFixed(2)+','+lon.toFixed(2)+','+radiusM;
+    if (key === state.lastFetchKey) return;
+    setStatus('chargement des données…');
+    const query = `
+      [out:json][timeout:25];
+      (
+        node["place"~"^(village|hamlet|town|city|isolated_dwelling)$"](around:${radiusM},${lat},${lon});
+        node["natural"="peak"](around:${radiusM},${lat},${lon});
+      );
+      out body;
+    `;
+    const endpoints = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter'
+    ];
+    let data=null, lastErr=null;
+    for (const ep of endpoints){
+      try{
+        const res = await fetch(ep, {method:'POST', body:'data='+encodeURIComponent(query)});
+        if (!res.ok) throw new Error('HTTP '+res.status);
+        data = await res.json();
+        break;
+      }catch(e){ lastErr = e; }
+    }
+    if (!data){
+      setStatus('hors ligne / serveur OSM indisponible', true);
+      return;
+    }
+    const pts = [];
+    for (const el of data.elements){
+      if (!el.tags) continue;
+      let type=null;
+      if (el.tags.natural === 'peak') type='peak';
+      else if (el.tags.place === 'town' || el.tags.place === 'city') type='town';
+      else if (el.tags.place) type='village';
+      if (!type) continue;
+      const name = el.tags.name || el.tags['name:fr'];
+      if (!name) continue;
+      pts.push({name, lat:el.lat, lon:el.lon, type, ele:el.tags.ele});
+    }
+    state.points = pts;
+    state.lastFetchKey = key;
+    setStatus(pts.length+' lieux chargés (rayon '+radiusKm+' km)');
+  }
+
+  // ---------- Rendu AR ----------
+  let renderScheduled = false;
+  function scheduleRender(){
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(render);
+  }
+
+  function render(){
+    renderScheduled = false;
+    els.arLayer.querySelectorAll('.tag').forEach(n=>n.remove());
+    if (state.lat==null || state.heading==null) return;
+
+    const w = window.innerWidth, h = window.innerHeight;
+    const fov = state.fov;
+    const heading = (state.heading + state.headingOffset + 360) % 360;
+
+    const visible = [];
+    for (const p of state.points){
+      if (!state.typesOn[p.type]) continue;
+      const dist = haversineDist(state.lat, state.lon, p.lat, p.lon);
+      if (dist > state.radiusKm) continue;
+      if (dist < 0.05) continue;
+      const br = bearing(state.lat, state.lon, p.lat, p.lon);
+      const diff = angDiff(br, heading);
+      if (Math.abs(diff) > fov/2) continue;
+      visible.push({...p, dist, diff});
+    }
+    visible.sort((a,b)=> b.dist - a.dist); // lointain d'abord (dessiné derrière), proche au-dessus
+    // évite l'entassement : décale verticalement les étiquettes trop proches en x
+    const placed = [];
+    for (const p of visible){
+      const x = w/2 + (p.diff/(fov/2)) * (w/2);
+      let y = h*0.5;
+      // recherche un slot vertical libre
+      let tries=0;
+      while (placed.some(q => Math.abs(q.x-x) < 90 && Math.abs(q.y-y) < 34) && tries<8){
+        y += (tries%2===0 ? 1 : -1) * 38 * Math.ceil((tries+1)/2);
+        tries++;
+      }
+      placed.push({x,y});
+
+      const el = document.createElement('div');
+      el.className = 'tag ' + p.type;
+      const distTxt = p.dist < 1 ? Math.round(p.dist*1000)+' m' : p.dist.toFixed(1)+' km';
+      el.innerHTML = `<span class="dot"></span><span class="name">${escapeHtml(p.name)}</span><span class="dist">${distTxt}</span>`;
+      el.style.left = x+'px';
+      el.style.top = y+'px';
+      const edgeFade = 1 - Math.max(0, Math.abs(p.diff)/(fov/2) - 0.85)/0.15;
+      el.style.opacity = Math.max(0.15, Math.min(1, edgeFade));
+      els.arLayer.appendChild(el);
+    }
+  }
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---------- Capteurs ----------
+  function onOrientation(e){
+    let h = null;
+    if (typeof e.webkitCompassHeading === 'number'){
+      h = e.webkitCompassHeading; // iOS: déjà nord=0, sens horaire
+    } else if (e.absolute && e.alpha!=null){
+      h = 360 - e.alpha;
+    } else if (e.alpha!=null){
+      h = 360 - e.alpha; // approximation si non-absolu
+    }
+    if (h==null || isNaN(h)) return;
+    h = (h+360)%360;
+    state.heading = h;
+    els.headingVal.textContent = Math.round(h)+'°';
+    els.headingCard.textContent = cardinal(h);
+    scheduleRender();
+  }
+
+  function startOrientation(){
+    const handler = (e)=> onOrientation(e);
+    if ('ondeviceorientationabsolute' in window){
+      window.addEventListener('deviceorientationabsolute', handler, true);
+    } else {
+      window.addEventListener('deviceorientation', handler, true);
+    }
+  }
+
+  async function requestOrientationPermission(){
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function'){
+      try{
+        const r = await DeviceOrientationEvent.requestPermission();
+        if (r !== 'granted') throw new Error('Permission boussole refusée');
+      }catch(e){ throw e; }
+    }
+    startOrientation();
+  }
+
+  function startGeolocation(){
+    if (!navigator.geolocation){
+      setStatus('GPS non disponible sur cet appareil', true);
+      return;
+    }
+    navigator.geolocation.watchPosition(pos=>{
+      const wasNull = state.lat==null;
+      state.lat = pos.coords.latitude;
+      state.lon = pos.coords.longitude;
+      if (wasNull) fetchPlaces(state.lat, state.lon, state.radiusKm);
+      scheduleRender();
+    }, err=>{
+      setStatus('GPS indisponible : '+err.message, true);
+    }, {enableHighAccuracy:true, maximumAge:5000, timeout:15000});
+  }
+
+  async function startCamera(){
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} },
+      audio:false
+    });
+    els.camera.srcObject = stream;
+  }
+
+  // ---------- UI ----------
+  els.startBtn.addEventListener('click', async ()=>{
+    els.startErr.textContent = '';
+    try{
+      await startCamera();
+      await requestOrientationPermission();
+      startGeolocation();
+      els.startOverlay.style.display = 'none';
+      setStatus('recherche du signal GPS…');
+    }catch(e){
+      els.startErr.textContent = 'Erreur : '+(e.message||e)+'. Vérifiez les autorisations caméra/position dans Chrome.';
+    }
+  });
+
+  els.openPanelBtn.addEventListener('click', ()=> els.panel.classList.add('open'));
+  els.closePanel.addEventListener('click', ()=> els.panel.classList.remove('open'));
+  els.recenterBtn.addEventListener('click', ()=>{
+    if (state.lat!=null) fetchPlaces(state.lat, state.lon, state.radiusKm);
+  });
+
+  els.radiusSlider.addEventListener('input', e=>{
+    state.radiusKm = parseInt(e.target.value,10);
+    els.radiusVal.textContent = state.radiusKm+' km';
+    scheduleRender();
+  });
+  els.radiusSlider.addEventListener('change', ()=>{
+    if (state.lat!=null) fetchPlaces(state.lat, state.lon, state.radiusKm);
+  });
+  els.fovSlider.addEventListener('input', e=>{
+    state.fov = parseInt(e.target.value,10);
+    els.fovVal.textContent = state.fov+'°';
+    scheduleRender();
+  });
+  els.offsetSlider.addEventListener('input', e=>{
+    state.headingOffset = parseInt(e.target.value,10);
+    els.offsetVal.textContent = state.headingOffset+'°';
+    scheduleRender();
+  });
+  els.refreshBtn.addEventListener('click', ()=>{
+    if (state.lat!=null) fetchPlaces(state.lat, state.lon, state.radiusKm);
+    els.panel.classList.remove('open');
+  });
+  els.chips.forEach(chip=>{
+    chip.addEventListener('click', ()=>{
+      const t = chip.dataset.type;
+      state.typesOn[t] = !state.typesOn[t];
+      chip.classList.toggle('active', state.typesOn[t]);
+      scheduleRender();
+    });
+  });
+
+  window.addEventListener('resize', scheduleRender);
+})();
+</script>
+</body>
+</html>
