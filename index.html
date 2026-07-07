@@ -54,7 +54,7 @@
   .tag.village .dot{background:var(--accent-village);}
   .tag.town .dot{background:var(--accent-town);}
   .tag.peak .dot{background:var(--accent-peak);}
-  .tag .name{font-weight:600; font-size:14px; letter-spacing:.01em;}
+  .tag .name{font-weight:600; font-size:14px; letter-spacing:.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .tag .dist{color:var(--dim); font-size:11.5px; font-variant-numeric:tabular-nums;}
 
   #topBar{
@@ -79,7 +79,10 @@
   }
   #statusPill.warn{color:var(--danger); border-color:rgba(255,92,92,0.4);}
 
-  #bottomBar{
+  #hiddenNote{
+    position:absolute; bottom:76px; left:0; right:0; text-align:center;
+    font-size:11.5px; color:var(--dim); pointer-events:none;
+  }
     position:absolute; left:0; right:0; bottom:0;
     padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 14px);
     background:linear-gradient(to top, rgba(0,0,0,0.6), transparent);
@@ -144,6 +147,7 @@
   <div id="arLayer">
     <div id="horizonLine"></div>
   </div>
+  <div id="hiddenNote"></div>
 
   <div id="topBar">
     <div id="compassReadout"><b id="headingVal">--°</b><span id="headingCard">-</span></div>
@@ -216,6 +220,7 @@
     headingVal: document.getElementById('headingVal'),
     headingCard: document.getElementById('headingCard'),
     statusPill: document.getElementById('statusPill'),
+    hiddenNote: document.getElementById('hiddenNote'),
     startOverlay: document.getElementById('startOverlay'),
     startBtn: document.getElementById('startBtn'),
     startErr: document.getElementById('startErr'),
@@ -315,21 +320,22 @@
   }
 
   async function fetchPeaks(lat, lon, radiusM){
-    const query = '[out:json][timeout:15];node["natural"="peak"]["name"](around:'+radiusM+','+lat+','+lon+');out body;';
+    const peakRadius = Math.round(radiusM*1.4); // les sommets se voient de plus loin
+    const query = '[out:json][timeout:15];node["natural"="peak"]["name"](around:'+peakRadius+','+lat+','+lon+');out body;';
     const endpoints = [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter'
+      {url:'https://overpass-api.de/api/interpreter', method:'POST'},
+      {url:'https://overpass.kumi.systems/api/interpreter', method:'POST'},
+      {url:'https://overpass-api.de/api/interpreter?data='+encodeURIComponent(query), method:'GET'},
+      {url:'https://lz4.overpass-api.de/api/interpreter', method:'POST'}
     ];
     for (const ep of endpoints){
       const controller = new AbortController();
       const t = setTimeout(()=> controller.abort(), 16000);
       try{
-        const res = await fetch(ep, {
-          method:'POST',
-          headers:{'Content-Type':'application/x-www-form-urlencoded'},
-          body:'data='+encodeURIComponent(query),
-          signal: controller.signal
-        });
+        const opts = ep.method==='GET'
+          ? {method:'GET', signal:controller.signal}
+          : {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'data='+encodeURIComponent(query), signal:controller.signal};
+        const res = await fetch(ep.url, opts);
         clearTimeout(t);
         if (!res.ok) continue;
         const data = await res.json();
@@ -398,30 +404,50 @@
       if (Math.abs(diff) > fov/2) continue;
       visible.push({...p, dist, diff});
     }
-    visible.sort((a,b)=> b.dist - a.dist); // lointain d'abord (dessiné derrière), proche au-dessus
-    // évite l'entassement : décale verticalement les étiquettes trop proches en x
-    const placed = [];
+    // Regroupe les points trop proches angulairement : ne garde que le plus proche par tranche
+    const bucketDeg = Math.max(1.2, fov/28);
+    const buckets = new Map();
     for (const p of visible){
-      const x = w/2 + (p.diff/(fov/2)) * (w/2);
+      const key = Math.round(p.diff / bucketDeg);
+      const existing = buckets.get(key);
+      if (!existing || p.dist < existing.dist) buckets.set(key, p);
+    }
+    let culled = [...buckets.values()];
+    // Limite le nombre total affiché : priorité aux plus proches, avec un minimum de sommets si présents
+    const MAX_TAGS = 14;
+    culled.sort((a,b)=> a.dist - b.dist);
+    if (culled.length > MAX_TAGS) culled = culled.slice(0, MAX_TAGS);
+
+    culled.sort((a,b)=> b.dist - a.dist); // lointain d'abord (dessiné derrière), proche au-dessus
+    const placed = [];
+    const margin = 8;
+    for (const p of culled){
+      const estWidth = Math.min(220, 40 + p.name.length*7.5);
+      let x = w/2 + (p.diff/(fov/2)) * (w/2);
+      x = Math.max(margin + estWidth/2, Math.min(w - margin - estWidth/2, x));
       let y = h*0.5;
-      // recherche un slot vertical libre
       let tries=0;
-      while (placed.some(q => Math.abs(q.x-x) < 90 && Math.abs(q.y-y) < 34) && tries<8){
-        y += (tries%2===0 ? 1 : -1) * 38 * Math.ceil((tries+1)/2);
+      while (placed.some(q => Math.abs(q.x-x) < (estWidth+q.w)/2 && Math.abs(q.y-y) < 36) && tries<10){
+        y += (tries%2===0 ? 1 : -1) * 40 * Math.ceil((tries+1)/2);
         tries++;
       }
-      placed.push({x,y});
+      y = Math.max(h*0.12, Math.min(h*0.82, y));
+      placed.push({x,y,w:estWidth});
 
+      const scale = Math.max(0.72, 1 - p.dist/(state.radiusKm*1.6));
       const el = document.createElement('div');
       el.className = 'tag ' + p.type;
       const distTxt = p.dist < 1 ? Math.round(p.dist*1000)+' m' : p.dist.toFixed(1)+' km';
-      el.innerHTML = `<span class="dot"></span><span class="name">${escapeHtml(p.name)}</span><span class="dist">${distTxt}</span>`;
+      el.innerHTML = `<span class="dot"></span><span class="name" style="max-width:${Math.max(60,estWidth-70)}px">${escapeHtml(p.name)}</span><span class="dist">${distTxt}</span>`;
       el.style.left = x+'px';
       el.style.top = y+'px';
+      el.style.transform = `translate(-50%,-50%) scale(${scale.toFixed(2)})`;
       const edgeFade = 1 - Math.max(0, Math.abs(p.diff)/(fov/2) - 0.85)/0.15;
-      el.style.opacity = Math.max(0.15, Math.min(1, edgeFade));
+      el.style.opacity = Math.max(0.25, Math.min(1, edgeFade)) * (0.55 + 0.45*scale);
       els.arLayer.appendChild(el);
     }
+    const hiddenCount = visible.length - culled.length;
+    els.hiddenNote.textContent = hiddenCount>0 ? (hiddenCount+' lieux masqués (zoom/rayon)') : '';
   }
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
