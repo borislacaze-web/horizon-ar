@@ -42,20 +42,42 @@
     height:1px; background:rgba(255,255,255,0.18);
   }
 
-  .tag{
-    position:absolute; top:50%; transform:translate(-50%,-50%);
-    padding:6px 10px 6px 8px; border-radius:10px;
-    background:var(--glass); backdrop-filter:blur(6px);
-    border:1px solid var(--line);
-    white-space:nowrap; display:flex; align-items:baseline; gap:6px;
-    transition:opacity .15s linear;
+  .marker{
+    position:absolute; top:0; left:0;
+    pointer-events:none;
+    transition:opacity .3s ease;
+    will-change:transform;
   }
-  .tag .dot{width:7px; height:7px; border-radius:50%; flex:0 0 auto;}
-  .tag.village .dot{background:var(--accent-village);}
-  .tag.town .dot{background:var(--accent-town);}
-  .tag.peak .dot{background:var(--accent-peak);}
-  .tag .name{font-weight:600; font-size:14px; letter-spacing:.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-  .tag .dist{color:var(--dim); font-size:11.5px; font-variant-numeric:tabular-nums;}
+  .marker .leader{
+    position:absolute; bottom:0; left:0;
+    width:1.5px; background:linear-gradient(to top, rgba(255,255,255,0.85), rgba(255,255,255,0.25));
+    transform:translateX(-0.75px);
+  }
+  .marker .anchor{
+    position:absolute; bottom:-3px; left:-3px;
+    width:6px; height:6px; border-radius:50%;
+    background:rgba(255,255,255,0.9);
+    box-shadow:0 0 4px rgba(0,0,0,0.6);
+  }
+  .marker .lbl{
+    position:absolute; left:0;
+    transform-origin:left bottom;
+    transform:rotate(-48deg);
+    white-space:nowrap;
+    display:flex; align-items:baseline; gap:5px;
+    padding:3px 8px 3px 6px; border-radius:8px;
+    background:rgba(8,12,18,0.62); backdrop-filter:blur(4px);
+    text-shadow:0 1px 2px rgba(0,0,0,0.8);
+  }
+  .marker.village .leader{background:linear-gradient(to top, #3ddc97, rgba(61,220,151,0.15));}
+  .marker.village .anchor{background:var(--accent-village);}
+  .marker.town .leader{background:linear-gradient(to top, #5aa8ff, rgba(90,168,255,0.15));}
+  .marker.town .anchor{background:var(--accent-town);}
+  .marker.peak .leader{background:linear-gradient(to top, #f2b84b, rgba(242,184,75,0.15));}
+  .marker.peak .anchor{background:var(--accent-peak);}
+  .marker .name{font-weight:650; font-size:13.5px; letter-spacing:.01em; color:var(--ink);}
+  .marker.peak .name{color:#ffd98a;}
+  .marker .dist{color:var(--dim); font-size:10.5px; font-variant-numeric:tabular-nums;}
 
   #topBar{
     position:absolute; top:0; left:0; right:0;
@@ -205,7 +227,8 @@
 
   const state = {
     lat:null, lon:null,
-    heading:null,           // 0-360, 0 = nord, sens horaire
+    heading:null,           // 0-360, 0 = nord, sens horaire (lissé)
+    rawHeading:null,        // dernière valeur brute du capteur
     headingOffset:0,
     fov:62,
     radiusKm:25,
@@ -424,17 +447,35 @@
     scheduleRender();
   }
 
-  // ---------- Rendu AR ----------
+  // ---------- Rendu AR (style PeakFinder : trait + texte incliné, marqueurs persistants) ----------
   let renderScheduled = false;
+  const markerPool = new Map(); // clé unique -> élément DOM persistant
+
   function scheduleRender(){
     if (renderScheduled) return;
     renderScheduled = true;
     requestAnimationFrame(render);
   }
 
+  function markerKey(p){ return p.type+'|'+p.name+'|'+p.lat.toFixed(4); }
+
+  function buildMarker(p){
+    const el = document.createElement('div');
+    el.className = 'marker ' + p.type;
+    const distTxt = p.dist < 1 ? Math.round(p.dist*1000)+' m' : p.dist.toFixed(1)+' km';
+    const eleTxt = (p.type==='peak' && p.ele) ? ' · '+Math.round(parseFloat(p.ele))+' m' : '';
+    el.innerHTML =
+      `<div class="leader"></div>
+       <div class="anchor"></div>
+       <div class="lbl"><span class="name">${escapeHtml(p.name)}</span><span class="dist">${distTxt}${eleTxt}</span></div>`;
+    el.style.opacity = '0';
+    els.arLayer.appendChild(el);
+    requestAnimationFrame(()=>{ el.style.opacity = ''; });
+    return el;
+  }
+
   function render(){
     renderScheduled = false;
-    els.arLayer.querySelectorAll('.tag').forEach(n=>n.remove());
     if (state.lat==null || state.heading==null) return;
 
     const w = window.innerWidth, h = window.innerHeight;
@@ -445,57 +486,66 @@
     for (const p of state.points){
       if (!state.typesOn[p.type]) continue;
       const dist = haversineDist(state.lat, state.lon, p.lat, p.lon);
-      if (dist > state.radiusKm) continue;
+      const maxDist = p.type==='peak' ? state.radiusKm*1.4 : state.radiusKm;
+      if (dist > maxDist) continue;
       if (dist < 0.05) continue;
       const br = bearing(state.lat, state.lon, p.lat, p.lon);
       const diff = angDiff(br, heading);
-      if (Math.abs(diff) > fov/2) continue;
+      if (Math.abs(diff) > fov/2 + 3) continue; // marge pour transition douce en bord
       visible.push({...p, dist, diff});
     }
-    // Regroupe les points trop proches angulairement : ne garde que le plus proche par tranche
-    const bucketDeg = Math.max(1.2, fov/28);
-    const buckets = new Map();
-    for (const p of visible){
-      const key = Math.round(p.diff / bucketDeg);
-      const existing = buckets.get(key);
-      if (!existing || p.dist < existing.dist) buckets.set(key, p);
-    }
-    let culled = [...buckets.values()];
-    // Limite le nombre total affiché : priorité aux plus proches, avec un minimum de sommets si présents
-    const MAX_TAGS = 14;
-    culled.sort((a,b)=> a.dist - b.dist);
-    if (culled.length > MAX_TAGS) culled = culled.slice(0, MAX_TAGS);
 
-    culled.sort((a,b)=> b.dist - a.dist); // lointain d'abord (dessiné derrière), proche au-dessus
-    const placed = [];
-    const margin = 8;
-    for (const p of culled){
-      const estWidth = Math.min(220, 40 + p.name.length*7.5);
-      let x = w/2 + (p.diff/(fov/2)) * (w/2);
-      x = Math.max(margin + estWidth/2, Math.min(w - margin - estWidth/2, x));
-      let y = h*0.5;
-      let tries=0;
-      while (placed.some(q => Math.abs(q.x-x) < (estWidth+q.w)/2 && Math.abs(q.y-y) < 36) && tries<10){
-        y += (tries%2===0 ? 1 : -1) * 40 * Math.ceil((tries+1)/2);
-        tries++;
+    // Anti-encombrement : une étiquette max par tranche angulaire, la plus proche gagne.
+    // Tranches distinctes pour sommets (au-dessus de l'horizon) et communes (en dessous).
+    const bucketDeg = Math.max(2.2, fov/16);
+    const chosen = [];
+    for (const group of ['peak','other']){
+      const buckets = new Map();
+      for (const p of visible){
+        const isPeak = p.type==='peak';
+        if ((group==='peak') !== isPeak) continue;
+        const key = Math.round(p.diff / bucketDeg);
+        const ex = buckets.get(key);
+        if (!ex || p.dist < ex.dist) buckets.set(key, p);
       }
-      y = Math.max(h*0.12, Math.min(h*0.82, y));
-      placed.push({x,y,w:estWidth});
-
-      const scale = Math.max(0.72, 1 - p.dist/(state.radiusKm*1.6));
-      const el = document.createElement('div');
-      el.className = 'tag ' + p.type;
-      const distTxt = p.dist < 1 ? Math.round(p.dist*1000)+' m' : p.dist.toFixed(1)+' km';
-      el.innerHTML = `<span class="dot"></span><span class="name" style="max-width:${Math.max(60,estWidth-70)}px">${escapeHtml(p.name)}</span><span class="dist">${distTxt}</span>`;
-      el.style.left = x+'px';
-      el.style.top = y+'px';
-      el.style.transform = `translate(-50%,-50%) scale(${scale.toFixed(2)})`;
-      const edgeFade = 1 - Math.max(0, Math.abs(p.diff)/(fov/2) - 0.85)/0.15;
-      el.style.opacity = Math.max(0.25, Math.min(1, edgeFade)) * (0.55 + 0.45*scale);
-      els.arLayer.appendChild(el);
+      chosen.push(...buckets.values());
     }
-    const hiddenCount = visible.length - culled.length;
-    els.hiddenNote.textContent = hiddenCount>0 ? (hiddenCount+' lieux masqués (zoom/rayon)') : '';
+
+    // Placement : ancre à x=azimut ; communes ancrées bas (55% hauteur), sommets haut (38%).
+    // Le trait (leader) monte de l'ancre jusqu'au texte incliné ; hauteurs alternées si voisins proches.
+    chosen.sort((a,b)=> a.diff - b.diff);
+    const seen = new Set();
+    let lastX = {peak:-1e9, other:-1e9}, lane = {peak:0, other:0};
+    for (const p of chosen){
+      const key = markerKey(p);
+      seen.add(key);
+      const g = p.type==='peak' ? 'peak' : 'other';
+      const x = w/2 + (p.diff/(fov/2)) * (w/2);
+      const anchorY = p.type==='peak' ? h*0.40 : h*0.58;
+      // alterne la hauteur du trait quand deux étiquettes sont proches en x
+      if (x - lastX[g] < 95) lane[g] = (lane[g]+1)%3; else lane[g] = 0;
+      lastX[g] = x;
+      const leaderH = 34 + lane[g]*44;
+
+      let el = markerPool.get(key);
+      if (!el){ el = buildMarker(p); markerPool.set(key, el); }
+      el.style.transform = `translate(${x.toFixed(1)}px, ${anchorY.toFixed(1)}px)`;
+      el.querySelector('.leader').style.height = leaderH+'px';
+      const lbl = el.querySelector('.lbl');
+      lbl.style.bottom = leaderH+'px';
+      const edgeFade = 1 - Math.max(0, Math.abs(p.diff)/(fov/2) - 0.9)/0.13;
+      el.style.opacity = Math.max(0, Math.min(1, edgeFade)).toFixed(2);
+    }
+
+    // supprime en douceur les marqueurs sortis du champ
+    for (const [key, el] of markerPool){
+      if (!seen.has(key)){
+        el.style.opacity = '0';
+        markerPool.delete(key);
+        setTimeout(()=> el.remove(), 320);
+      }
+    }
+    els.hiddenNote.textContent = '';
   }
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -513,16 +563,7 @@
     }
     if (h==null || isNaN(h)) return;
     h = (h+360)%360;
-    if (state.heading==null){
-      state.heading = h;
-    } else {
-      // lissage circulaire (EMA) : évite les sauts brusques dus au bruit du capteur
-      let delta = ((h - state.heading + 540) % 360) - 180;
-      state.heading = (state.heading + delta*0.25 + 360) % 360;
-    }
-    els.headingVal.textContent = Math.round(state.heading)+'°';
-    els.headingCard.textContent = cardinal(state.heading);
-    scheduleRender();
+    state.rawHeading = h; // le lissage se fait dans la boucle de rendu
   }
 
   function startOrientation(){
@@ -532,6 +573,26 @@
     } else {
       window.addEventListener('deviceorientation', handler, true);
     }
+    // Boucle de rendu continue : lissage fort du cap + rendu à 60fps, sans scintillement
+    function loop(){
+      if (state.rawHeading != null){
+        if (state.heading == null){
+          state.heading = state.rawHeading;
+        } else {
+          const delta = ((state.rawHeading - state.heading + 540) % 360) - 180;
+          state.heading = (state.heading + delta*0.08 + 360) % 360;
+        }
+        const shown = Math.round(state.heading);
+        if (shown !== state._shownHeading){
+          state._shownHeading = shown;
+          els.headingVal.textContent = shown+'°';
+          els.headingCard.textContent = cardinal(state.heading);
+        }
+        render();
+      }
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
   }
 
   async function requestOrientationPermission(){
