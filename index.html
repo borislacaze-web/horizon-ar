@@ -233,8 +233,11 @@
     fov:62,
     radiusKm:25,
     points:[],              // {name, lat, lon, type, dist, bearing}
+    pointsByKey:null,
     typesOn:{village:true, town:true, peak:true},
-    lastFetchKey:null
+    lastFetchKey:null,
+    myElevation:null,       // altitude GPS de l'utilisateur (m), si dispo
+    selection:{time:0, keys:null} // sélection de lieux affichés, figée quelques instants pour éviter le scintillement
   };
 
   const els = {
@@ -411,11 +414,23 @@
 
   async function fetchPeaks(lat, lon, radiusM){
     const peakRadiusKm = (radiusM/1000)*1.4; // les sommets se voient de plus loin
-    try{
-      const pts = await fetchPeaksFromWikidata(lat, lon, peakRadiusKm);
-      if (pts && pts.length) return pts;
-    }catch(e){ /* on retente via Overpass */ }
-    return await fetchPeaksFromOverpass(lat, lon, Math.round(peakRadiusKm*1000));
+    const [wdResult, opResult] = await Promise.allSettled([
+      fetchPeaksFromWikidata(lat, lon, peakRadiusKm),
+      fetchPeaksFromOverpass(lat, lon, Math.round(peakRadiusKm*1000))
+    ]);
+    const wd = wdResult.status==='fulfilled' ? (wdResult.value||[]) : [];
+    const op = opResult.status==='fulfilled' ? (opResult.value||[]) : [];
+    // fusion par nom normalisé : garde la version avec altitude si les deux existent
+    const norm = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');
+    const byName = new Map();
+    for (const p of [...wd, ...op]){
+      const k = norm(p.name);
+      const ex = byName.get(k);
+      if (!ex) byName.set(k, p);
+      else if (!ex.ele && p.ele) byName.set(k, p);
+    }
+    const merged = [...byName.values()];
+    return merged.length ? merged : null;
   }
 
   async function fetchPlaces(lat, lon, radiusKm){
@@ -432,6 +447,7 @@
       return;
     }
     state.points = communes;
+    state.pointsByKey = new Map(communes.map(p=> [markerKey(p), p]));
     state.lastFetchKey = key;
     setStatus(communes.length+' communes chargées — recherche des sommets…');
     scheduleRender();
@@ -440,6 +456,7 @@
     const peaks = await fetchPeaks(lat, lon, radiusM);
     if (peaks && peaks.length){
       state.points = communes.concat(peaks);
+      state.pointsByKey = new Map(state.points.map(p=> [markerKey(p), p]));
       setStatus(communes.length+' communes + '+peaks.length+' sommets');
     } else {
       setStatus(communes.length+' communes (sommets indisponibles)');
@@ -481,54 +498,83 @@
     const w = window.innerWidth, h = window.innerHeight;
     const fov = state.fov;
     const heading = (state.heading + state.headingOffset + 360) % 360;
+    const now = performance.now();
 
-    const visible = [];
-    for (const p of state.points){
-      if (!state.typesOn[p.type]) continue;
+    // La LISTE des lieux affichés n'est recalculée qu'au maximum 2x/seconde :
+    // c'est ce qui évite qu'un léger mouvement change tout l'affichage d'un coup.
+    // Le POSITIONNEMENT (x/y de chaque étiquette déjà choisie), lui, est mis à jour à chaque frame.
+    if (!state.selection.keys || now - state.selection.time > 500){
+      const candidates = [];
+      for (const p of state.points){
+        if (!state.typesOn[p.type]) continue;
+        const dist = haversineDist(state.lat, state.lon, p.lat, p.lon);
+        const maxDist = p.type==='peak' ? state.radiusKm*1.4 : state.radiusKm;
+        if (dist > maxDist || dist < 0.05) continue;
+        const br = bearing(state.lat, state.lon, p.lat, p.lon);
+        const diff = angDiff(br, heading);
+        if (Math.abs(diff) > fov/2 + 2) continue;
+        candidates.push({...p, dist, diff});
+      }
+      const bucketDeg = Math.max(4, fov/10);
+      let chosen = [];
+      const MAX_PEAKS = 5, MAX_PLACES = 6;
+      for (const group of ['peak','other']){
+        const buckets = new Map();
+        for (const p of candidates){
+          const isPeak = p.type==='peak';
+          if ((group==='peak') !== isPeak) continue;
+          const key = Math.round(p.diff / bucketDeg);
+          const ex = buckets.get(key);
+          if (!ex || p.dist < ex.dist) buckets.set(key, p);
+        }
+        let arr = [...buckets.values()];
+        const rank = q => q.type==='town' ? 0 : q.type==='village' ? 1 : 2;
+        arr.sort((a,b)=> (rank(a)-rank(b)) || (a.dist-b.dist));
+        arr = arr.slice(0, group==='peak' ? MAX_PEAKS : MAX_PLACES);
+        chosen.push(...arr);
+      }
+      state.selection = { time: now, keys: chosen.map(p=> markerKey(p)) , hiddenCount: candidates.length - chosen.length };
+      els.hiddenNote.textContent = state.selection.hiddenCount>0
+        ? ('+'+state.selection.hiddenCount+' à proximité (réduis le rayon pour les voir)')
+        : '';
+    }
+
+    // Reconstruit les points actuellement sélectionnés avec leur position CETTE frame
+    const shown = [];
+    for (const key of state.selection.keys){
+      const p = state.pointsByKey && state.pointsByKey.get(key);
+      if (!p) continue;
       const dist = haversineDist(state.lat, state.lon, p.lat, p.lon);
-      const maxDist = p.type==='peak' ? state.radiusKm*1.4 : state.radiusKm;
-      if (dist > maxDist) continue;
-      if (dist < 0.05) continue;
       const br = bearing(state.lat, state.lon, p.lat, p.lon);
       const diff = angDiff(br, heading);
-      if (Math.abs(diff) > fov/2 + 3) continue; // marge pour transition douce en bord
-      visible.push({...p, dist, diff});
+      shown.push({...p, dist, diff});
     }
+    shown.sort((a,b)=> a.diff - b.diff);
 
-    // Anti-encombrement : une étiquette max par tranche angulaire, la plus proche gagne.
-    // Tranches distinctes pour sommets (au-dessus de l'horizon) et communes (en dessous).
-    const bucketDeg = Math.max(4, fov/10);
-    let chosen = [];
-    const MAX_PEAKS = 5, MAX_PLACES = 6;
-    for (const group of ['peak','other']){
-      const buckets = new Map();
-      for (const p of visible){
-        const isPeak = p.type==='peak';
-        if ((group==='peak') !== isPeak) continue;
-        const key = Math.round(p.diff / bucketDeg);
-        const ex = buckets.get(key);
-        if (!ex || p.dist < ex.dist) buckets.set(key, p);
-      }
-      let arr = [...buckets.values()];
-      // priorité : villes avant villages avant hameaux, puis plus proche
-      const rank = q => q.type==='town' ? 0 : q.type==='village' ? 1 : 2;
-      arr.sort((a,b)=> (rank(a)-rank(b)) || (a.dist-b.dist));
-      arr = arr.slice(0, group==='peak' ? MAX_PEAKS : MAX_PLACES);
-      chosen.push(...arr);
-    }
-
-    // Placement : ancre à x=azimut ; communes ancrées bas (55% hauteur), sommets haut (38%).
-    // Le trait (leader) monte de l'ancre jusqu'au texte incliné ; hauteurs alternées si voisins proches.
-    chosen.sort((a,b)=> a.diff - b.diff);
+    const horizonY = h*0.5;
     const seen = new Set();
     let lastX = {peak:-1e9, other:-1e9}, lane = {peak:0, other:0};
-    for (const p of chosen){
+    for (const p of shown){
       const key = markerKey(p);
       seen.add(key);
       const g = p.type==='peak' ? 'peak' : 'other';
       const x = w/2 + (p.diff/(fov/2)) * (w/2);
-      const anchorY = p.type==='peak' ? h*0.40 : h*0.58;
-      // alterne la hauteur du trait quand deux étiquettes sont proches en x
+
+      let anchorY;
+      if (p.type==='peak'){
+        // Position verticale selon l'angle d'élévation réel (altitude sommet vs altitude utilisateur)
+        const peakEle = p.ele ? parseFloat(p.ele) : null;
+        if (peakEle && state.myElevation!=null){
+          const elevAngleDeg = toDeg(Math.atan2(peakEle - state.myElevation, p.dist*1000));
+          const clamped = Math.max(-3, Math.min(18, elevAngleDeg));
+          anchorY = horizonY - h*0.06 - (clamped/18) * (h*0.24);
+        } else {
+          anchorY = horizonY - h*0.10; // altitude inconnue : position par défaut, juste au-dessus de l'horizon
+        }
+      } else {
+        anchorY = horizonY + h*0.08;
+      }
+
       if (x - lastX[g] < 95) lane[g] = (lane[g]+1)%3; else lane[g] = 0;
       lastX[g] = x;
       const leaderH = 34 + lane[g]*44;
@@ -543,7 +589,7 @@
       el.style.opacity = Math.max(0, Math.min(1, edgeFade)).toFixed(2);
     }
 
-    // supprime en douceur les marqueurs sortis du champ
+    // supprime en douceur les marqueurs sortis de la sélection
     for (const [key, el] of markerPool){
       if (!seen.has(key)){
         el.style.opacity = '0';
@@ -551,9 +597,6 @@
         setTimeout(()=> el.remove(), 320);
       }
     }
-    els.hiddenNote.textContent = (visible.length > chosen.length)
-      ? ('+'+(visible.length-chosen.length)+' à proximité (réduis le rayon pour les voir)')
-      : '';
   }
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -623,6 +666,9 @@
       const wasNull = state.lat==null;
       state.lat = pos.coords.latitude;
       state.lon = pos.coords.longitude;
+      if (typeof pos.coords.altitude === 'number' && !isNaN(pos.coords.altitude)){
+        state.myElevation = pos.coords.altitude;
+      }
       if (wasNull) fetchPlaces(state.lat, state.lon, state.radiusKm);
       scheduleRender();
     }, err=>{
