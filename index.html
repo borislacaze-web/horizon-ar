@@ -281,14 +281,23 @@
     let data=null, lastErr=null;
     for (const ep of endpoints){
       try{
-        const res = await fetch(ep, {method:'POST', body:'data='+encodeURIComponent(query)});
-        if (!res.ok) throw new Error('HTTP '+res.status);
+        const res = await fetch(ep, {
+          method:'POST',
+          headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:'data='+encodeURIComponent(query)
+        });
+        if (!res.ok){
+          const bodyTxt = await res.text().catch(()=> '');
+          throw new Error('HTTP '+res.status+' ('+ep.replace('https://','').split('/')[0]+') '+bodyTxt.slice(0,120));
+        }
         data = await res.json();
         break;
       }catch(e){ lastErr = e; }
     }
     if (!data){
-      setStatus('hors ligne / serveur OSM indisponible', true);
+      const msg = lastErr ? (lastErr.message || String(lastErr)) : 'erreur inconnue';
+      setStatus('Erreur OSM: '+msg.slice(0,140), true);
+      console.error('Overpass fetch failed', lastErr);
       return;
     }
     const pts = [];
